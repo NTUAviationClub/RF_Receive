@@ -4,7 +4,7 @@
 :Revision: 0.3.0
 :License: Public Domain
 
-= Project: {Project}
+= Project: RC Airplane Receiver
 
 Arduino Code for DIY RC airplane.  The main feature of the program is that it contains IMU stabilization system.
 
