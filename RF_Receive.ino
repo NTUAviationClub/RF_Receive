@@ -12,6 +12,20 @@
 #define DEBUG_FLG 1
 #define DEBUG_PRINT(x){if(DEBUG_FLG){Serial.print(x);}}
 
+// Limit Function
+// ub must > lb
+inline double lim(double val, double ub, double lb){
+  if(val>ub){
+    return ub;
+  }
+  else if(val<lb){
+    return lb;
+  }
+  else{
+    return val;
+  }
+}
+
 // Period Control
 unsigned int cnt = 0, cnt_max = 1e4;
 FTYPE last_print = 0;
@@ -41,14 +55,27 @@ int rngelv  = ELV_RNG_;
 int angflap = FLP_RNG_;
 // IMU
 MPU6050 mpu6050(Wire);
+FTYPE r_ = 0, p_ = 0, y_ = 0;
 // Kalman Filter
 FTYPE last_time = 0;
 // Controller
 // set up lpf
 FT pitch_filter, roll_filter;
+FT ax_filter, ay_filter, az_filter;
 // set up pid
 FT pitch_pid, roll_pid;
 // filter and controller space
+// for acc input
+DTYPE ax_filter_last_input[RC_MEMORY_SIZE];
+DTYPE ax_filter_last_output[RC_MEMORY_SIZE];
+DTYPE ax_filter_param[RC_PARAM_SIZE];
+DTYPE ay_filter_last_input[RC_MEMORY_SIZE];
+DTYPE ay_filter_last_output[RC_MEMORY_SIZE];
+DTYPE ay_filter_param[RC_PARAM_SIZE];
+DTYPE az_filter_last_input[RC_MEMORY_SIZE];
+DTYPE az_filter_last_output[RC_MEMORY_SIZE];
+DTYPE az_filter_param[RC_PARAM_SIZE];
+// for PID
 DTYPE pitch_filter_last_input[RC_MEMORY_SIZE];
 DTYPE pitch_filter_last_output[RC_MEMORY_SIZE];
 DTYPE pitch_filter_param[RC_PARAM_SIZE];
@@ -64,7 +91,7 @@ DTYPE roll_pid_param[PID_PARAM_SIZE];
 
 void setup() {
   // Serial Port
-  Serial.begin(9600);
+  Serial.begin(115200);
   Serial.println("=== Start ===");
 
   // Radio
@@ -89,14 +116,48 @@ void setup() {
   mpu6050.begin();
   //mpu6050.calcGyroOffsets(true);
 
-  // EKF Test
-  ekf7_init();
+  // Pose Estimator Set
   quaternion_init_QE6();
+  set_reference_QE6(0, 0, 1);
+  // EKF Set
+#ifdef USE_EKF_
+  ekf7_init();
   ekf7_set_Propagation_Noise(1e-1, 1e-1, 1e-1, 1e-3, 1e-3, 1e-3, 1e-3);
   ekf7_set_Observation_Noise(1e-3, 1e-3, 1e-3, 1e-3);
-  set_reference_QE6(0, 0, 1);
+#endif
 
   // Controller Setup
+  // ax filter
+  ax_filter.size = RC_MEMORY_SIZE;
+  ax_filter.last_pos = 0;
+  ax_filter.last_time = 0.0f;
+  ax_filter.current_input = 0;
+  ax_filter.current_output = 0;
+  ax_filter.last_input = ax_filter_last_input;
+  ax_filter.last_output = ax_filter_last_output;
+  ax_filter.param = ax_filter_param;
+  ax_filter.param[RC_CUTOFF] = AX_COF_;
+  // ay filter
+  ay_filter.size = RC_MEMORY_SIZE;
+  ay_filter.last_pos = 0;
+  ay_filter.last_time = 0.0f;
+  ay_filter.current_input = 0;
+  ay_filter.current_output = 0;
+  ay_filter.last_input = ay_filter_last_input;
+  ay_filter.last_output = ay_filter_last_output;
+  ay_filter.param = ay_filter_param;
+  ay_filter.param[RC_CUTOFF] = AY_COF_;
+  // az filter
+  az_filter.size = RC_MEMORY_SIZE;
+  az_filter.last_pos = 0;
+  az_filter.last_time = 0.0f;
+  az_filter.current_input = 0;
+  az_filter.current_output = 0;
+  az_filter.last_input = az_filter_last_input;
+  az_filter.last_output = az_filter_last_output;
+  az_filter.param = az_filter_param;
+  az_filter.param[RC_CUTOFF] = AZ_COF_;
+  
   // Pitch filter
   pitch_filter.size = RC_MEMORY_SIZE;
   pitch_filter.last_pos = 0;
@@ -185,28 +246,53 @@ void loop() {
   FTYPE ax = mpu6050.getAccX();
   FTYPE ay = mpu6050.getAccY();
   FTYPE az = mpu6050.getAccZ();
-  FTYPE norma = sqrt(pow(ax, 2) + pow(ay, 2) + pow(az, 2));
   FTYPE gx = mpu6050.getGyroX();
   FTYPE gy = mpu6050.getGyroY();
   FTYPE gz = mpu6050.getGyroZ();
-
+  
   // Take dt
   FTYPE now = (FTYPE) millis() / 1000;
   FTYPE dt = now - last_time;
   last_time = now;
 
+  // LPF for acc data
+  ax_filter.current_input = ax;
+  rc_update(now, &ax_filter);
+  FTYPE ax_smooth = ax_filter.current_output;
+  ay_filter.current_input = ay;
+  rc_update(now, &ay_filter);
+  FTYPE ay_smooth = ay_filter.current_output;
+  az_filter.current_input = az;
+  rc_update(now, &az_filter);
+  FTYPE az_smooth = az_filter.current_output;
+  FTYPE norma = sqrt(pow(ax_smooth, 2) + pow(ay_smooth, 2) + pow(az_smooth, 2));
+
   // Attitude Estimation
   // Set Measurement
-  set_measurement_QE6(ax / norma, ay / norma, az / norma);
+  set_measurement_QE6(ax_smooth / norma, ay_smooth / norma, az_smooth / norma);
   // Update
   quaternion_update_QE6();
   // Get qe6 quaternion
-  FTYPE qw_, qx_, qy_, qz_;
-  get_qk_QE6(&qw_, &qx_, &qy_, &qz_);
+  // FTYPE qw_, qx_, qy_, qz_;
+  // get_qk_QE6(&qw_, &qx_, &qy_, &qz_);
   // Get qe6 rpy
   FTYPE _r, _p, _y;
   get_rpy_QE6(&_r, &_p, &_y);
-
+  if((_r==NAN)||(_p==NAN)||(_y==NAN)){
+    _r = r_;
+    _p = p_;
+    _y = y_;
+    Serial.println("Nan Measured");
+  }
+  else{
+    r_ = _r;
+    p_ = _p;
+    y_ = _y;
+  }
+  // Remap the rpy due to IMU installation
+  _p = -_p;
+  
+#ifdef USE_EKF_
   FTYPE bx = 0, by = 0, bz = 0;
   FTYPE _er = 0, _ep = 0, _ey = 0;
   // Bias estimation for EKF
@@ -220,7 +306,7 @@ void loop() {
     // Get ekf rpy
     ekf7_get_rpy(&_er, &_ep, &_ey);
   }
-
+#endif
   // Controller
   // Roll command
   DTYPE p = 0, i = 0, d = 0;
@@ -233,14 +319,20 @@ void loop() {
   pitch_pid.current_input = _p;
   pid_update(now, pthcmd, &pitch_pid, PID_NOT_QUEUE, &pitch_filter);
   pthcmd = pitch_pid.current_output;
+  //get_last_pid(&p, &i, &d);
 
   // Actuation
   // Set Servo Output
   int _mthr = 1000 + msg.throttle;
-  int _mail_l = avgailL + rolcmd - (angflap * msg.flap);
-  int _mail_r = avgailR - rolcmd - (angflap * msg.flap);
-  int _melv = avgelv + pthcmd;
+  int _mail_l = avgailL - rolcmd - (angflap * msg.flap);
+  int _mail_r = avgailR - rolcmd + (angflap * msg.flap);
+  int _melv = avgelv - pthcmd;
   int _mrud = map(msg.rudder, 500, -500, avgrud - rngrud, avgrud + rngrud);
+  // Servo Output Limitation
+  _mail_l = lim(_mail_l, avgailL + rngailL, avgailL - rngailL);
+  _mail_r = lim(_mail_r, avgailR + rngailR, avgailR - rngailR);
+  _melv = lim(_melv, avgelv + rngelv, avgelv - rngelv);
+  // Write the output
   mythr.writeMicroseconds (_mthr);
   myailL.write(_mail_l);
   myailR.write(_mail_r);
@@ -249,8 +341,10 @@ void loop() {
 
   // Debug Print
   if ((cnt % PRT_PER_) == 0) {
-    // if(false){
-    Serial.println(now - last_print);
+#ifdef PRT_PER
+    DEBUG_PRINT(now - last_print)
+    DEBUG_PRINT("\r\n")
+#endif
 #ifdef PRT_RADIO
     DEBUG_PRINT("[Radio] Throttle: ")
     DEBUG_PRINT(msg.throttle) // 顯示訊息內容
@@ -267,18 +361,54 @@ void loop() {
     DEBUG_PRINT("\r\n")
 #endif
 #ifdef PRT_IMU
-    DEBUG_PRINT("[IMU] Gyro (");
+#ifdef USE_EKF_
+    DEBUG_PRINT("[IMU] Gyro ( ");
     DEBUG_PRINT(gx);
     DEBUG_PRINT(",");
     DEBUG_PRINT(gy);
     DEBUG_PRINT(",");
     DEBUG_PRINT(gz);
-    DEBUG_PRINT("), Substract Bias (");
+    DEBUG_PRINT("), Substract Bias ( ");
     DEBUG_PRINT(gx - bx);
     DEBUG_PRINT(",");
     DEBUG_PRINT(gy - by);
     DEBUG_PRINT(",");
     DEBUG_PRINT(gz - bz);
+    DEBUG_PRINT(")\r\n")
+#endif
+#endif
+#ifdef PRT_ACC
+    DEBUG_PRINT("[ACC] ( ");
+    DEBUG_PRINT(ax);
+    DEBUG_PRINT(", ");
+    DEBUG_PRINT(ay);
+    DEBUG_PRINT(", ");
+    DEBUG_PRINT(az);
+    DEBUG_PRINT(" )")
+    DEBUG_PRINT(", [smoothed] ( ");
+    DEBUG_PRINT(ax_smooth);
+    DEBUG_PRINT(", ");
+    DEBUG_PRINT(ay_smooth);
+    DEBUG_PRINT(", ");
+    DEBUG_PRINT(az_smooth);
+    DEBUG_PRINT(" )\r\n")
+#endif
+#ifdef PRT_GYR
+    DEBUG_PRINT("[GYR] Gyro ( ");
+    DEBUG_PRINT(gx);
+    DEBUG_PRINT(",");
+    DEBUG_PRINT(gy);
+    DEBUG_PRINT(",");
+    DEBUG_PRINT(gz);
+    DEBUG_PRINT(" )\r\n")
+#endif
+#ifdef PRT_RPY
+    DEBUG_PRINT("[RPY] (");
+    DEBUG_PRINT(_r);
+    DEBUG_PRINT(",");
+    DEBUG_PRINT(_p);
+    DEBUG_PRINT(",");
+    DEBUG_PRINT(_y);
     DEBUG_PRINT(")\r\n")
 #endif
 #ifdef PRT_CONTROL
@@ -292,6 +422,13 @@ void loop() {
     DEBUG_PRINT(_melv);
     DEBUG_PRINT(", Rudder: ");
     DEBUG_PRINT(_mrud);
+    /*
+    DEBUG_PRINT(", Pitch P: ");
+    DEBUG_PRINT(p);
+    DEBUG_PRINT(", Pitch I: ");
+    DEBUG_PRINT(i);
+    DEBUG_PRINT(", Pitch D: ");
+    DEBUG_PRINT(d);*/
     DEBUG_PRINT("\r\n")
 #endif
     last_print = now;
